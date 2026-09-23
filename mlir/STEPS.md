@@ -5,7 +5,6 @@ Each numbered file lives in `mlir/out/`. Re-generate with:
 ```bash
 cd ./mlir
 ./run_steps.sh
-./lower_amx.sh
 ```
 
 Need `/opt/rocm/llvm/bin` on `PATH` (`mlir-opt`, `mlir-translate`, `mlir-runner`, `llc`).
@@ -145,7 +144,7 @@ Must print **`19`**. `run_steps.sh` fails if it does not.
 | `13_contract.s` | `llc -mcpu=x86-64-v4` | wider SIMD than the 2×2 |
 | `13_contract_isa.txt` | grep of `.s` | `vmulps` / `vfmadd` / similar |
 
-When a new ISA lands, change only the convert flag (see `lower_amx.sh`), keep `vector_contract.mlir`.
+When a new ISA lands, change only the convert flag (e.g. `enable-amx`), keep `vector_contract.mlir`.
 
 ---
 
@@ -179,14 +178,6 @@ New architecture: change tile sizes or the **backend**, not `@matmul`.
 
 ---
 
-## 14 `14_amx_cpuid.txt`  (`./lower_amx.sh`)
-
-On AMD EPYC this is a **SKIP**: no `amx_tile` in `/proc/cpuinfo`. The script records the CPU and the command you would run on a CPU that has AMX (`--convert-vector-to-llvm=enable-amx`, then grep `tdpbf16ps`).
-
-PACE on this box uses AVX-512 BF16 (`vdpbf16ps`), not AMX (`tdpbf16ps`).
-
----
-
 ## 15 `15_pace_vs_mlir.txt`
 
 ISA dump **plus** the recommended portable path (not a GFLOPS race):
@@ -211,4 +202,4 @@ Manifest written at the end of `run_steps.sh`: date, host, `mlir-opt` path, and 
 
 ## `RUN_LOG.txt`
 
-Full stdout of `run_steps.sh` then `lower_amx.sh` (copied after those scripts finish).
+Full stdout of `run_steps.sh` (copied after the script finishes).

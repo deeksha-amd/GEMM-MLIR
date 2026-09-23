@@ -25,7 +25,6 @@ cd GEMM-MLIR
 # MLIR recommended shape (no ISA in source): portable_matmul.mlir
 ./mlir/run_portable.sh
 ./mlir/run_steps.sh
-./mlir/lower_amx.sh
 
 # Both (PACE first; inspect is slow on the 4096 GEMM).
 ./run_both.sh
@@ -61,7 +60,13 @@ mlir/
   run_portable.sh    layer 1–2 only
   bench_flops.sh     PACE vs 2x2 vs contract vs portable GFLOP/s
   run_steps.sh       writes out/00 .. out/22, INDEX, 15
-  lower_amx.sh       writes out/14_amx_cpuid.txt (SKIP on EPYC)
   STEPS.md           walkthrough of the dumps
   README.md          overview
+  chain/             LLVM 22 (Docker): linalg.matmul -> pack -> tile -> vdpbf16ps
+    01_contract_to_dot.mlir   vector.contract -> x86vector.avx512.dot
+    02_matmul_pack.mlir       pack K=2, 1x16 tile
+    04_matmul_12x32.mlir      pack [12,32,2], 12x32 register tile
+    bench_prod_12x32.mlir     128x4096x4096 timed run
+    run.sh                    build image, run 01/02 -> vdpbf16ps
+    bench_in_container.sh     time bench_prod_12x32.mlir
 ```

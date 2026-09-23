@@ -109,29 +109,6 @@ VECTORIZED_CPU_PIPELINE = [
     "--convert-index-to-llvm",
     "--reconcile-unrealized-casts",
 ]
-# Hand-written bf16 ukernel: the kernel body is already at vector level and
-# already carries llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512".
-# That op is an LLVM-dialect op over LLVM-compatible types (vector<16xf32>,
-# vector<32xbf16>), so no pass has to touch it -- we only have to lower the
-# linalg.fill in @main, the scf loops, the memrefs and the vector load/store/
-# bitcast/broadcast around it.  Notably there is NO --convert-vector-to-scf
-# here: every vector op in the kernel is 1-D, and letting vector-to-scf run
-# would spill the accumulators to an alloca and destroy the register tile.
-BF16_UKERNEL_PIPELINE = [
-    "--convert-linalg-to-loops",
-    "--canonicalize",
-    "--cse",
-    "--convert-scf-to-cf",
-    "--expand-strided-metadata",
-    "--lower-affine",
-    "--convert-vector-to-llvm=enable-x86vector",
-    "--convert-arith-to-llvm",
-    "--finalize-memref-to-llvm",
-    "--convert-func-to-llvm",
-    "--convert-cf-to-llvm",
-    "--convert-index-to-llvm",
-    "--reconcile-unrealized-casts",
-]
 
 
 def find_bin() -> Path:
@@ -210,8 +187,7 @@ def run_timed_ir(runner: Path, llvm_mlir: Path, timeout: int) -> list[float]:
     """Run a bench whose @main prints: seconds, then one or more checksums.
 
     Returns every number printed, so a row can police as much of the result as
-    its kernel reports (the bf16 ukernel prints C[0][0] *and* the number of C
-    elements that are not the expected value).
+    its kernel reports.
 
     @main is `void`: with -entry-point-result=i32 mlir-runner also prints the
     return value, and because it goes through llvm::outs() while printF64 goes
@@ -280,11 +256,7 @@ def bench_prod_mlir(bin_dir: Path, dtype: str) -> list[dict]:
     timeout = int(os.environ.get("PROD_TIMEOUT", "1200"))
     naive_reps = int(os.environ.get("PROD_REPS_NAIVE", "1"))
     reps = int(os.environ.get("PROD_REPS", "3"))
-    # expect=None means the row prints a checksum we do not police.  The bf16
-    # ukernel does: A and B are all bf16 1.0 and C accumulates, so after the
-    # warmup pass plus `reps` timed passes every C element must be exactly
-    # K*(1+reps).  A fast-but-wrong kernel is worse than a slow one, so a
-    # mismatch turns the row into FAILED CHECK instead of a GFLOP/s number.
+    # expect=None means the row prints a checksum we do not police.
     specs = [
         ("matmul.mlir style (naive loops)", BENCH / "prod_naive.mlir.in",
          naive_reps, CPU_PIPELINE, False, "no tiling, no vectorization", None),
@@ -294,11 +266,6 @@ def bench_prod_mlir(bin_dir: Path, dtype: str) -> list[dict]:
          reps, VECTORIZED_CPU_PIPELINE, True, "[32,64,64]+[4,16,1]+vectorize",
          None),
     ]
-    if dtype == "bf16":
-        specs.append(
-            ("bf16 ukernel (VNNI + dpbf16ps)", BENCH / "prod_bf16_ukernel.mlir.in",
-             reps, BF16_UKERNEL_PIPELINE, False,
-             "MR=12 x NR=32 reg tile, VNNI B panel", K * (1 + reps)))
     rows = []
     for label, src, r, pipeline, transform, note, expect in specs:
         tag = f"{dtype}_r{r}"
@@ -492,23 +459,10 @@ def main() -> None:
             "mlir-runner JITs at --O3; its default --O0 costs the portable row 1.7x.",
             "The naive row is identical at --O0 and --O3: it stalls on B's stride-4096",
             "  column walk, so JIT codegen quality cannot help it.",
-            "Plain MLIR bf16 has no ukernel: arith on bf16 is extf/mulf/truncf, which",
-            "  is why the bf16 portable row is no faster than the f32 one.",
-            "The bf16 ukernel row is the answer to that: VNNI-packed A/B panels of i32",
-            "  pairs, vector.bitcast to vector<32xbf16>, and llvm.call_intrinsic",
-            "  llvm.x86.avx512bf16.dpbf16ps.512 -- the same instruction libXSMM JITs.",
-            "  Its inner loop is 2 B loads + 12 vbroadcastss + 24 vdpbf16ps on 24 zmm",
-            "  accumulators, no spills, C hoisted out of the k loop.",
-            "  Like PACE's preprocess(), the A/B pack is not timed in either row.",
-            "  Checksum-verified: A,B are all bf16 1.0, so every one of the 524288 C",
-            "  elements must be K*(1+reps); the row is FAILED CHECK if any is not.",
-            "  Register tile, packed layout and loop order were swept; packing B into",
-            "  per-NR panels is worth 2-4x on its own -> out/bf16_tuning.txt.",
-            "This core retires 9.03 G vdpbf16ps/s with zero memory traffic, i.e. an ISA",
-            "  peak of 578 GFLOP/s bf16 (bench/peak_dpbf16ps.mlir.in). The ukernel row",
-            "  sits at 91-94% of that ceiling, so what is left is B streaming from L3,",
-            "  not codegen: there is no faster instruction on this machine.",
-            "Assembly proof for the row above: out/bf16_ukernel_isa.txt.",
+            "Plain MLIR bf16 lowers arith on bf16 to extf/mulf/truncf, which is why",
+            "  the bf16 portable row is no faster than the f32 one.",
+            "The vdpbf16ps row (pack + 12x32 tile) needs LLVM 22 in Docker:",
+            "  chain/bench_in_container.sh -> chain/out/prod12_flops.txt.",
         ]
     else:
         rows.extend(bench_tiny(bin_dir))

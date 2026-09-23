@@ -24,7 +24,6 @@ cd ./mlir
 ./run_steps.sh          # all dumps including portable 20–22
 ./bench_flops.sh          # tiny FP32 table → out/flops.txt
 ./bench_flops.sh --prod   # 128×4096×4096 bf16 like-to-like → out/flops_prod.txt
-./lower_amx.sh          # no-op on EPYC; records CPUID
 
 # both stacks
 cd .
@@ -57,7 +56,6 @@ MLIR_BIN=/path/to/llvm/bin ./run_steps.sh
 | `11_contract_parse.mlir` | `vector.contract` | ISA hook (not loops) |
 | `12_contract_llvm.mlir` | `--convert-vector-to-llvm=enable-x86vector` + `--convert-arith-to-llvm` | no leftover `arith.` |
 | `13_contract.ll` / `.s` / `_isa.txt` | translate + llc of the contract | wider SIMD than the 2×2 loops |
-| `14_amx_cpuid.txt` | `lower_amx.sh` | AMX skip on EPYC |
 | `15_pace_vs_mlir.txt` | four-way ISA | PACE / 2×2 / contract / intrinsic |
 | `16_dpbf16_parse.mlir` | `dpbf16ps.mlir` | `llvm.x86.avx512bf16.dpbf16ps.512` |
 | `17_dpbf16.ll` | `mlir-translate` | LLVM IR of the intrinsic |
@@ -135,6 +133,6 @@ mlir-opt dpbf16ps.mlir | mlir-translate --mlir-to-llvmir \
 
 1. `lscpu | grep -E 'amx|avx512_bf16'`
 2. Keep `matmul.mlir` / `vector_contract.mlir` / `portable_matmul.mlir`. Do not put new ISAs in product IR.
-3. Add or enable one conversion (see `lower_amx.sh`)
+3. Add or enable one conversion (e.g. `--convert-vector-to-llvm=enable-amx`)
 4. Diff `09_isa_hits.txt` / `13_contract_isa.txt` vs the new mnemonic (`tdpbf16ps`, etc.)
 5. PACE: upgrade `amd-pace` / libXSMM; dump JIT; grep that mnemonic there too

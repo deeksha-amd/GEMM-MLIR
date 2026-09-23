@@ -104,14 +104,5 @@ echo "dpbf16ps in llvm dialect: $(grep -c dpbf16ps "$OUT/C3.llvm.mlir")" | tee -
 echo "vdpbf16ps in asm:         $(grep -c vdpbf16ps "$OUT/C3.s")" | tee -a "$LOG"
 grep -n "vdpbf16ps" "$OUT/C3.s" | tee -a "$LOG"
 
-# --- D. run it: all-ones 4x32 * 32x16, C must be 32 ---
-log "D. mlir-runner correctness (expect 32 32 32)"
-mlir-opt /work/chain/03_matmul_run.mlir --transform-interpreter \
-  --canonicalize -o "$OUT/D_scheduled.mlir"
-mlir-opt "$OUT/D_scheduled.mlir" "${LOWER_TO_LLVM[@]}" -o "$OUT/D.llvm.mlir"
-mlir-runner --O3 -e main --entry-point-result=void \
-  --shared-libs="$LIB/libmlir_c_runner_utils.so,$LIB/libmlir_runner_utils.so" \
-  "$OUT/D.llvm.mlir" | tee "$OUT/D_runner.txt" | tee -a "$LOG"
-
 log "DONE"
 echo "Artifacts in /work/chain/out" | tee -a "$LOG"

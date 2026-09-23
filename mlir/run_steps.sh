@@ -4,7 +4,6 @@
 #
 # Usage:
 #   ./run_steps.sh
-#   ./lower_amx.sh     # after this; writes 14_amx_cpuid.txt
 set -euo pipefail
 # Needs mlir-opt + mlir-translate + mlir-runner + llc in ONE bin dir.
 # The ROCm docker images and some compute nodes ship only part of that set,
@@ -30,8 +29,8 @@ if [[ -z "${MLIR_STEPS_LOGGING:-}" ]]; then
   exit "$rc"
 fi
 
-# Keep 14_amx_* if lower_amx.sh already ran; wipe the rest for a clean re-run.
-find "$OUT" -maxdepth 1 -type f ! -name '14_amx*' ! -name 'RUN_LOG.txt' -delete 2>/dev/null || true
+# Wipe old dumps for a clean re-run.
+find "$OUT" -maxdepth 1 -type f ! -name 'RUN_LOG.txt' -delete 2>/dev/null || true
 
 need() {
   command -v "$1" >/dev/null && return 0
@@ -333,7 +332,6 @@ MLIR_VER=$("$MLIR_BIN" --version 2>&1 | head -1 || true)
   echo "13_contract.ll               LLVM IR of the contract"
   echo "13_contract.s                llc asm of the contract"
   echo "13_contract_isa.txt          grep of 13_contract.s"
-  echo "14_amx_cpuid.txt             from lower_amx.sh (SKIP on EPYC)"
   echo "15_pace_vs_mlir.txt          ISA table + portable shape (section 5)"
   echo "16_dpbf16_parse.mlir         dpbf16ps.mlir (ISA decoder, not product)"
   echo "17_dpbf16.ll                 LLVM IR of the intrinsic"
@@ -344,7 +342,7 @@ MLIR_VER=$("$MLIR_BIN" --version 2>&1 | head -1 || true)
   echo "22_portable_proof.txt        no vdpbf16ps in portable IR"
   echo "NOTES.txt                    greps of 04 / 09 / 10 / 13 / 18 / 22"
   echo "INDEX.txt                    this file"
-  echo "RUN_LOG.txt                  stdout of run_steps.sh + lower_amx.sh"
+  echo "RUN_LOG.txt                  stdout of run_steps.sh"
   echo
   echo "files now in this directory:"
   ls -1 "$OUT"
@@ -354,5 +352,4 @@ echo
 echo "Dumps in $PWD/$OUT"
 echo "Walkthrough:  $PWD/STEPS.md"
 echo "Overview:     $PWD/README.md"
-echo "Next:         ./lower_amx.sh"
 echo "PACE JIT:     grep vdpbf16ps ../kernel_dump/*br3*.mxm.s | head"

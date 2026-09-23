@@ -10,9 +10,8 @@ echo "########## 1/2 PACE TPP (libXSMM vdpbf16ps) ##########"
 
 echo
 echo "########## 2/2 MLIR linalg.matmul (step dumps in mlir/out/) ##########"
-chmod +x mlir/run_steps.sh mlir/lower_amx.sh mlir/run_portable.sh
+chmod +x mlir/run_steps.sh mlir/run_portable.sh
 ./mlir/run_steps.sh
-./mlir/lower_amx.sh || true
 
 echo
 echo "Compare (mnemonics, not GFLOPS):"
