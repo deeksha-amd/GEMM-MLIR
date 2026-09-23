@@ -1,0 +1,117 @@
+// Roofline probe: how many vdpbf16ps can this core retire per second?
+//
+// 16 independent accumulators, both source operands loop-invariant, zero
+// memory traffic in the loop.  Whatever this prints is the hardware ceiling
+// for the bf16 ukernel in prod_bf16_ukernel.mlir.in -- no GEMM can beat it.
+//
+// Each vdpbf16ps does 16 f32 lanes x (2 multiplies + 2 adds) = 64 flops.
+// $ITERS iterations x 16 instructions x 64 flops.
+
+func.func private @rtclock() -> f64
+func.func private @printF64(f64)
+func.func private @printNewline()
+
+func.func @peak(%a: vector<32xbf16>, %b: vector<32xbf16>,
+                %z: vector<16xf32>, %n: index) -> vector<16xf32> {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+
+  %r:16 = scf.for %i = %c0 to %n step %c1
+      iter_args(%s0 = %z, %s1 = %z, %s2 = %z, %s3 = %z,
+                %s4 = %z, %s5 = %z, %s6 = %z, %s7 = %z,
+                %s8 = %z, %s9 = %z, %s10 = %z, %s11 = %z,
+                %s12 = %z, %s13 = %z, %s14 = %z, %s15 = %z)
+      -> (vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>,
+          vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>,
+          vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>,
+          vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>) {
+    %n0 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s0, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n1 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s1, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n2 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s2, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n3 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s3, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n4 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s4, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n5 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s5, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n6 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s6, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n7 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s7, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n8 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s8, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n9 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s9, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n10 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s10, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n11 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s11, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n12 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s12, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n13 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s13, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n14 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s14, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    %n15 = llvm.call_intrinsic "llvm.x86.avx512bf16.dpbf16ps.512"(%s15, %a, %b)
+        : (vector<16xf32>, vector<32xbf16>, vector<32xbf16>) -> vector<16xf32>
+    scf.yield %n0, %n1, %n2, %n3, %n4, %n5, %n6, %n7,
+              %n8, %n9, %n10, %n11, %n12, %n13, %n14, %n15
+        : vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>,
+          vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>,
+          vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>,
+          vector<16xf32>, vector<16xf32>, vector<16xf32>, vector<16xf32>
+  }
+  // fold the 16 chains so none of them is dead code
+  %t0 = arith.addf %r#0, %r#1 : vector<16xf32>
+  %t1 = arith.addf %r#2, %r#3 : vector<16xf32>
+  %t2 = arith.addf %r#4, %r#5 : vector<16xf32>
+  %t3 = arith.addf %r#6, %r#7 : vector<16xf32>
+  %t4 = arith.addf %r#8, %r#9 : vector<16xf32>
+  %t5 = arith.addf %r#10, %r#11 : vector<16xf32>
+  %t6 = arith.addf %r#12, %r#13 : vector<16xf32>
+  %t7 = arith.addf %r#14, %r#15 : vector<16xf32>
+  %u0 = arith.addf %t0, %t1 : vector<16xf32>
+  %u1 = arith.addf %t2, %t3 : vector<16xf32>
+  %u2 = arith.addf %t4, %t5 : vector<16xf32>
+  %u3 = arith.addf %t6, %t7 : vector<16xf32>
+  %v0 = arith.addf %u0, %u1 : vector<16xf32>
+  %v1 = arith.addf %u2, %u3 : vector<16xf32>
+  %w = arith.addf %v0, %v1 : vector<16xf32>
+  return %w : vector<16xf32>
+}
+
+func.func @main() {
+  %c0 = arith.constant 0 : index
+  %iters = arith.constant $ITERS : index
+  // 0x3F803F80 = two packed bf16 1.0 values
+  %pair = arith.constant 1065369472 : i32
+  %wv = vector.broadcast %pair : i32 to vector<16xi32>
+  %a = vector.bitcast %wv : vector<16xi32> to vector<32xbf16>
+  %zf = arith.constant 0.0 : f32
+  %z = vector.broadcast %zf : f32 to vector<16xf32>
+
+  %warm = func.call @peak(%a, %a, %z, %iters)
+      : (vector<32xbf16>, vector<32xbf16>, vector<16xf32>, index)
+      -> vector<16xf32>
+
+  %t0 = func.call @rtclock() : () -> f64
+  %r = func.call @peak(%a, %a, %z, %iters)
+      : (vector<32xbf16>, vector<32xbf16>, vector<16xf32>, index)
+      -> vector<16xf32>
+  %t1 = func.call @rtclock() : () -> f64
+
+  %dt = arith.subf %t1, %t0 : f64
+  func.call @printF64(%dt) : (f64) -> ()
+  func.call @printNewline() : () -> ()
+
+  // keep %r and %warm live
+  %s = arith.addf %r, %warm : vector<16xf32>
+  %e = vector.extract %s[0] : f32 from vector<16xf32>
+  %ef = arith.extf %e : f32 to f64
+  func.call @printF64(%ef) : (f64) -> ()
+  func.call @printNewline() : () -> ()
+  return
+}

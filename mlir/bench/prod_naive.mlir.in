@@ -1,0 +1,57 @@
+// Naive linalg.matmul at PACE production size, timed INSIDE the IR.
+// $TY = f32 | bf16    $REPS = timed repetitions
+//
+// Fixes vs the first bench: rtclock brackets only the GEMM, so JIT compile,
+// memref alloc and the 4096x4096 fill are no longer counted. The reps loop
+// accumulates into C, so no repetition can be hoisted or dead-coded.
+
+func.func private @rtclock() -> f64
+func.func private @printF64(f64)
+func.func private @printNewline()
+
+func.func @matmul(%A: tensor<128x4096x$TY>, %B: tensor<4096x4096x$TY>,
+                  %C: tensor<128x4096x$TY>) -> tensor<128x4096x$TY> {
+  %0 = linalg.matmul ins(%A, %B : tensor<128x4096x$TY>, tensor<4096x4096x$TY>)
+                     outs(%C : tensor<128x4096x$TY>) -> tensor<128x4096x$TY>
+  return %0 : tensor<128x4096x$TY>
+}
+
+func.func @main() {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %reps = arith.constant $REPS : index
+  %one = arith.constant 1.0 : $TY
+  %zf = arith.constant 0.0 : $TY
+
+  %Ae = tensor.empty() : tensor<128x4096x$TY>
+  %Be = tensor.empty() : tensor<4096x4096x$TY>
+  %Ce = tensor.empty() : tensor<128x4096x$TY>
+  %A = linalg.fill ins(%one : $TY) outs(%Ae : tensor<128x4096x$TY>) -> tensor<128x4096x$TY>
+  %B = linalg.fill ins(%one : $TY) outs(%Be : tensor<4096x4096x$TY>) -> tensor<4096x4096x$TY>
+  %C0 = linalg.fill ins(%zf : $TY) outs(%Ce : tensor<128x4096x$TY>) -> tensor<128x4096x$TY>
+
+  // Warmup: first touch / page faults happen here, not in the timed region.
+  %Cw = func.call @matmul(%A, %B, %C0)
+      : (tensor<128x4096x$TY>, tensor<4096x4096x$TY>, tensor<128x4096x$TY>)
+      -> tensor<128x4096x$TY>
+
+  %t0 = func.call @rtclock() : () -> f64
+  %Cr = scf.for %r = %c0 to %reps step %c1
+      iter_args(%acc = %Cw) -> (tensor<128x4096x$TY>) {
+    %t = func.call @matmul(%A, %B, %acc)
+        : (tensor<128x4096x$TY>, tensor<4096x4096x$TY>, tensor<128x4096x$TY>)
+        -> tensor<128x4096x$TY>
+    scf.yield %t : tensor<128x4096x$TY>
+  }
+  %t1 = func.call @rtclock() : () -> f64
+
+  %dt = arith.subf %t1, %t0 : f64
+  func.call @printF64(%dt) : (f64) -> ()
+  func.call @printNewline() : () -> ()
+
+  %v = tensor.extract %Cr[%c0, %c0] : tensor<128x4096x$TY>
+  %vf = arith.extf %v : $TY to f64
+  func.call @printF64(%vf) : (f64) -> ()
+  func.call @printNewline() : () -> ()
+  return
+}

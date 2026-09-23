@@ -1,0 +1,40 @@
+// Timed 16x16 linalg.matmul + same tile schedule as portable_matmul.mlir.
+// FLOPs/gemm = 2*16*16*16 = 8192. Tiling does not change FLOP count.
+
+module attributes {transform.with_named_sequence} {
+  func.func @matmul(%A: tensor<16x16xf32>, %B: tensor<16x16xf32>,
+                    %C: tensor<16x16xf32>) -> tensor<16x16xf32> {
+    %0 = linalg.matmul ins(%A, %B : tensor<16x16xf32>, tensor<16x16xf32>)
+                       outs(%C : tensor<16x16xf32>) -> tensor<16x16xf32>
+    return %0 : tensor<16x16xf32>
+  }
+
+  func.func @main() -> i32 {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %n = arith.constant $ITERS : index
+    %A = arith.constant dense<1.0> : tensor<16x16xf32>
+    %B = arith.constant dense<1.0> : tensor<16x16xf32>
+    %zero = arith.constant dense<0.0> : tensor<16x16xf32>
+    %init = arith.constant 0.0 : f32
+    %acc = scf.for %i = %c0 to %n step %c1 iter_args(%s = %init) -> (f32) {
+      %C = func.call @matmul(%A, %B, %zero)
+          : (tensor<16x16xf32>, tensor<16x16xf32>, tensor<16x16xf32>) -> tensor<16x16xf32>
+      %v = tensor.extract %C[%c0, %c0] : tensor<16x16xf32>
+      %s2 = arith.addf %s, %v : f32
+      scf.yield %s2 : f32
+    }
+    %i32 = arith.fptosi %acc : f32 to i32
+    return %i32 : i32
+  }
+
+  transform.named_sequence @__transform_main(%root: !transform.any_op) {
+    %mm = transform.structured.match ops{["linalg.matmul"]} in %root
+        : (!transform.any_op) -> !transform.any_op
+    %tiled, %ii, %jj, %kk = transform.structured.tile_using_for %mm
+        tile_sizes [8, 8, 8]
+        : (!transform.any_op) -> (!transform.any_op, !transform.any_op,
+                                  !transform.any_op, !transform.any_op)
+    transform.yield
+  }
+}

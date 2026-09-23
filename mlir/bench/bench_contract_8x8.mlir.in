@@ -1,0 +1,34 @@
+// Timed 8x8 vector.contract (same op as vector_contract.mlir). FLOPs/gemm = 2*8*8*8 = 1024.
+
+#mapA = affine_map<(m, n, k) -> (m, k)>
+#mapB = affine_map<(m, n, k) -> (k, n)>
+#mapC = affine_map<(m, n, k) -> (m, n)>
+
+func.func @contract(%A: vector<8x8xf32>, %B: vector<8x8xf32>,
+                    %C: vector<8x8xf32>) -> vector<8x8xf32> {
+  %0 = vector.contract
+    {indexing_maps = [#mapA, #mapB, #mapC],
+     iterator_types = ["parallel", "parallel", "reduction"],
+     kind = #vector.kind<add>}
+    %A, %B, %C : vector<8x8xf32>, vector<8x8xf32> into vector<8x8xf32>
+  return %0 : vector<8x8xf32>
+}
+
+func.func @main() -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %n = arith.constant $ITERS : index
+  %A = arith.constant dense<1.0> : vector<8x8xf32>
+  %B = arith.constant dense<1.0> : vector<8x8xf32>
+  %Z = arith.constant dense<0.0> : vector<8x8xf32>
+  %init = arith.constant 0.0 : f32
+  %acc = scf.for %i = %c0 to %n step %c1 iter_args(%s = %init) -> (f32) {
+    %C = func.call @contract(%A, %B, %Z)
+        : (vector<8x8xf32>, vector<8x8xf32>, vector<8x8xf32>) -> vector<8x8xf32>
+    %v = vector.extract %C[0, 0] : f32 from vector<8x8xf32>
+    %s2 = arith.addf %s, %v : f32
+    scf.yield %s2 : f32
+  }
+  %i = arith.fptosi %acc : f32 to i32
+  return %i : i32
+}

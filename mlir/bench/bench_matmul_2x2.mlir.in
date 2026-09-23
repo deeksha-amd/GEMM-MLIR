@@ -1,0 +1,28 @@
+// Timed 2x2 linalg.matmul (same kernel as matmul.mlir). FLOPs/gemm = 2*2*2*2 = 16.
+// @main loops $ITERS times so wall time is measurable. Do not use for ISA dumps.
+
+func.func @matmul(%A: tensor<2x2xf32>, %B: tensor<2x2xf32>,
+                  %C: tensor<2x2xf32>) -> tensor<2x2xf32> {
+  %0 = linalg.matmul ins(%A, %B : tensor<2x2xf32>, tensor<2x2xf32>)
+                     outs(%C : tensor<2x2xf32>) -> tensor<2x2xf32>
+  return %0 : tensor<2x2xf32>
+}
+
+func.func @main() -> i32 {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %n = arith.constant $ITERS : index
+  %A = arith.constant dense<[[1.0, 2.0], [3.0, 4.0]]> : tensor<2x2xf32>
+  %B = arith.constant dense<[[5.0, 6.0], [7.0, 8.0]]> : tensor<2x2xf32>
+  %zero = arith.constant dense<0.0> : tensor<2x2xf32>
+  %init = arith.constant 0.0 : f32
+  %acc = scf.for %i = %c0 to %n step %c1 iter_args(%s = %init) -> (f32) {
+    %C = func.call @matmul(%A, %B, %zero)
+        : (tensor<2x2xf32>, tensor<2x2xf32>, tensor<2x2xf32>) -> tensor<2x2xf32>
+    %v = tensor.extract %C[%c0, %c0] : tensor<2x2xf32>
+    %s2 = arith.addf %s, %v : f32
+    scf.yield %s2 : f32
+  }
+  %i = arith.fptosi %acc : f32 to i32
+  return %i : i32
+}

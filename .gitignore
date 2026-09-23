@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+kernel_dump/
+mlir/out/
+mlir/chain/out/
+core
+*.core
+.DS_Store

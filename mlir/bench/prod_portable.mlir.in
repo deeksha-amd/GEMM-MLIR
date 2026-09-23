@@ -1,0 +1,92 @@
+// portable_matmul.mlir shape at PACE production size, timed in-IR.
+// $TY = f32 | bf16    $REPS = timed repetitions
+//
+// Layer 2 now does what the first bench was missing:
+//   cache tile [32,64,64] -> register tile [4,16,1] -> vectorize
+// Without the register tile + vectorize step the loops stay scalar, which is
+// why the earlier run reported ~0.5 GFLOP/s. Still no VNNI pack and no
+// bf16 ukernel: that gap is PACE/libXSMM, not something this schedule fixes.
+
+module attributes {transform.with_named_sequence} {
+  func.func private @rtclock() -> f64
+  func.func private @printF64(f64)
+  func.func private @printNewline()
+
+  func.func @matmul(%A: tensor<128x4096x$TY>, %B: tensor<4096x4096x$TY>,
+                    %C: tensor<128x4096x$TY>) -> tensor<128x4096x$TY> {
+    %0 = linalg.matmul ins(%A, %B : tensor<128x4096x$TY>, tensor<4096x4096x$TY>)
+                       outs(%C : tensor<128x4096x$TY>) -> tensor<128x4096x$TY>
+    return %0 : tensor<128x4096x$TY>
+  }
+
+  func.func @main() {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %reps = arith.constant $REPS : index
+    %one = arith.constant 1.0 : $TY
+    %zf = arith.constant 0.0 : $TY
+
+    %Ae = tensor.empty() : tensor<128x4096x$TY>
+    %Be = tensor.empty() : tensor<4096x4096x$TY>
+    %Ce = tensor.empty() : tensor<128x4096x$TY>
+    %A = linalg.fill ins(%one : $TY) outs(%Ae : tensor<128x4096x$TY>) -> tensor<128x4096x$TY>
+    %B = linalg.fill ins(%one : $TY) outs(%Be : tensor<4096x4096x$TY>) -> tensor<4096x4096x$TY>
+    %C0 = linalg.fill ins(%zf : $TY) outs(%Ce : tensor<128x4096x$TY>) -> tensor<128x4096x$TY>
+
+    %Cw = func.call @matmul(%A, %B, %C0)
+        : (tensor<128x4096x$TY>, tensor<4096x4096x$TY>, tensor<128x4096x$TY>)
+        -> tensor<128x4096x$TY>
+
+    %t0 = func.call @rtclock() : () -> f64
+    %Cr = scf.for %r = %c0 to %reps step %c1
+        iter_args(%acc = %Cw) -> (tensor<128x4096x$TY>) {
+      %t = func.call @matmul(%A, %B, %acc)
+          : (tensor<128x4096x$TY>, tensor<4096x4096x$TY>, tensor<128x4096x$TY>)
+          -> tensor<128x4096x$TY>
+      scf.yield %t : tensor<128x4096x$TY>
+    }
+    %t1 = func.call @rtclock() : () -> f64
+
+    %dt = arith.subf %t1, %t0 : f64
+    func.call @printF64(%dt) : (f64) -> ()
+    func.call @printNewline() : () -> ()
+
+    %v = tensor.extract %Cr[%c0, %c0] : tensor<128x4096x$TY>
+    %vf = arith.extf %v : $TY to f64
+    func.call @printF64(%vf) : (f64) -> ()
+    func.call @printNewline() : () -> ()
+    return
+  }
+
+  transform.named_sequence @__transform_main(%root: !transform.any_op {transform.readonly}) {
+    %mm = transform.structured.match ops{["linalg.matmul"]} in %root
+        : (!transform.any_op) -> !transform.any_op
+    // Cache tile.
+    %l1, %i1, %j1, %k1 = transform.structured.tile_using_for %mm
+        tile_sizes [32, 64, 64]
+        : (!transform.any_op) -> (!transform.any_op, !transform.any_op,
+                                  !transform.any_op, !transform.any_op)
+    // Register tile: small enough that vectorization yields real SIMD.
+    %l2, %i2, %j2, %k2 = transform.structured.tile_using_for %l1
+        tile_sizes [4, 16, 1]
+        : (!transform.any_op) -> (!transform.any_op, !transform.any_op,
+                                  !transform.any_op, !transform.any_op)
+    // Vectorize @matmul only. Matching every func.func would also vectorize
+    // the fills in @main, and full-unroll then expands the 4096x4096 fill
+    // into 4096 stores of vector<4096xf32>.
+    %fn = transform.get_parent_op %l2 {op_name = "func.func"}
+        : (!transform.any_op) -> !transform.any_op
+    %vfn = transform.structured.vectorize_children_and_apply_patterns %fn
+        : (!transform.any_op) -> !transform.any_op
+    // The register tile vectorizes to vector.contract of vector<4x1> by
+    // vector<1x16>. Its default lowering is a dot product: 64 scalar
+    // llvm.intr.vector.reduce.fadd on vector<1xf32>. outerproduct instead
+    // gives 4 fmuladd on vector<16xf32>, i.e. 4 zmm vfmadd231ps.
+    transform.apply_patterns to %vfn {
+      transform.apply_patterns.vector.lower_contraction
+          lowering_strategy = "outerproduct"
+      transform.apply_patterns.canonicalization
+    } : !transform.any_op
+    transform.yield
+  }
+}

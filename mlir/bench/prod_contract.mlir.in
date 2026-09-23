@@ -1,0 +1,90 @@
+// vector_contract.mlir op at PACE production size, timed in-IR.
+// $TY = f32 | bf16    $REPS = timed repetitions
+//
+// A 128x4096 vector is not a register tile, so the 8x8 vector.contract is
+// tiled over the whole GEMM. C accumulates across reps, so nothing is hoisted.
+
+#mapA = affine_map<(m, n, k) -> (m, k)>
+#mapB = affine_map<(m, n, k) -> (k, n)>
+#mapC = affine_map<(m, n, k) -> (m, n)>
+
+func.func private @rtclock() -> f64
+func.func private @printF64(f64)
+func.func private @printNewline()
+
+func.func @contract(%A: vector<8x8x$TY>, %B: vector<8x8x$TY>,
+                    %C: vector<8x8x$TY>) -> vector<8x8x$TY> {
+  %0 = vector.contract
+    {indexing_maps = [#mapA, #mapB, #mapC],
+     iterator_types = ["parallel", "parallel", "reduction"],
+     kind = #vector.kind<add>}
+    %A, %B, %C : vector<8x8x$TY>, vector<8x8x$TY> into vector<8x8x$TY>
+  return %0 : vector<8x8x$TY>
+}
+
+func.func @gemm(%A: memref<128x4096x$TY>, %B: memref<4096x4096x$TY>,
+                %C: memref<128x4096x$TY>) {
+  %c0 = arith.constant 0 : index
+  %c8 = arith.constant 8 : index
+  %c128 = arith.constant 128 : index
+  %c4096 = arith.constant 4096 : index
+  %pad = arith.constant 0.0 : $TY
+  scf.for %i = %c0 to %c128 step %c8 {
+    scf.for %j = %c0 to %c4096 step %c8 {
+      %c_init = vector.transfer_read %C[%i, %j], %pad {in_bounds = [true, true]}
+          : memref<128x4096x$TY>, vector<8x8x$TY>
+      %c_acc = scf.for %k = %c0 to %c4096 step %c8
+          iter_args(%acc = %c_init) -> (vector<8x8x$TY>) {
+        %a = vector.transfer_read %A[%i, %k], %pad {in_bounds = [true, true]}
+            : memref<128x4096x$TY>, vector<8x8x$TY>
+        %b = vector.transfer_read %B[%k, %j], %pad {in_bounds = [true, true]}
+            : memref<4096x4096x$TY>, vector<8x8x$TY>
+        %t = func.call @contract(%a, %b, %acc)
+            : (vector<8x8x$TY>, vector<8x8x$TY>, vector<8x8x$TY>) -> vector<8x8x$TY>
+        scf.yield %t : vector<8x8x$TY>
+      }
+      vector.transfer_write %c_acc, %C[%i, %j] {in_bounds = [true, true]}
+          : vector<8x8x$TY>, memref<128x4096x$TY>
+    }
+  }
+  return
+}
+
+func.func @main() {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  %reps = arith.constant $REPS : index
+  %one = arith.constant 1.0 : $TY
+  %zf = arith.constant 0.0 : $TY
+
+  %A = memref.alloc() : memref<128x4096x$TY>
+  %B = memref.alloc() : memref<4096x4096x$TY>
+  %C = memref.alloc() : memref<128x4096x$TY>
+  linalg.fill ins(%one : $TY) outs(%A : memref<128x4096x$TY>)
+  linalg.fill ins(%one : $TY) outs(%B : memref<4096x4096x$TY>)
+  linalg.fill ins(%zf : $TY) outs(%C : memref<128x4096x$TY>)
+
+  func.call @gemm(%A, %B, %C) : (memref<128x4096x$TY>, memref<4096x4096x$TY>,
+                                 memref<128x4096x$TY>) -> ()
+
+  %t0 = func.call @rtclock() : () -> f64
+  scf.for %r = %c0 to %reps step %c1 {
+    func.call @gemm(%A, %B, %C) : (memref<128x4096x$TY>, memref<4096x4096x$TY>,
+                                   memref<128x4096x$TY>) -> ()
+  }
+  %t1 = func.call @rtclock() : () -> f64
+
+  %dt = arith.subf %t1, %t0 : f64
+  func.call @printF64(%dt) : (f64) -> ()
+  func.call @printNewline() : () -> ()
+
+  %v = memref.load %C[%c0, %c0] : memref<128x4096x$TY>
+  %vf = arith.extf %v : $TY to f64
+  func.call @printF64(%vf) : (f64) -> ()
+  func.call @printNewline() : () -> ()
+
+  memref.dealloc %A : memref<128x4096x$TY>
+  memref.dealloc %B : memref<4096x4096x$TY>
+  memref.dealloc %C : memref<128x4096x$TY>
+  return
+}

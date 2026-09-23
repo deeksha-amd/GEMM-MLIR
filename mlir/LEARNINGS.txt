@@ -1,0 +1,583 @@
+================================================================================
+LEARNINGS.txt  --  everything this folder taught us about GEMM, MLIR and PACE
+================================================================================
+Machine : AMD EPYC 9655 96-core (login node), avx512f + avx512_bf16, no AMX
+Tools   : /opt/rocm/llvm/bin, AMD LLVM version 20.0.0git
+Workload: C = A @ B.  PACE Linear is Y = X @ W.T, so A = X and B = W.T.
+Sizes   : 2x2 / 8x8 / 16x16 for teaching, 128x4096x4096 bf16 for production.
+
+Read this top to bottom once. Sections 1-3 are concepts, 4-7 are the
+measurements and the mistakes, 8 is the recommendation, 9 is the file map.
+Section 10 is the long-form version of four things that are easy to get
+wrong: register widths, what portable_matmul.mlir actually is, what VNNI
+interleaving means, and how the bf16 ukernel works.
+
+
+================================================================================
+1. THE ONE IDEA
+================================================================================
+A GEMM has exactly one definition:
+
+    C[i,j] += A[i,k] * B[k,j]        FLOPs = 2*M*N*K
+
+Everything else -- loops, tiles, vectors, VNNI packing, vdpbf16ps, threads --
+is an *implementation* of that definition. The whole point of MLIR is to write
+the definition once (linalg.matmul) and let a backend choose the
+implementation per machine.
+
+The failure mode is writing the implementation into the source. dpbf16ps.mlir
+in this folder does exactly that, on purpose, so you can see why it is wrong
+as a product decision.
+
+
+================================================================================
+2. THE TWO COMPILERS IN THIS REPO (they never touch each other)
+================================================================================
+PACE / libXSMM (../run_gemm.py, ../kernel_dump/)
+  - TPP = Tensor Processing Primitives. libXSMM is the library.
+  - At Python runtime, the first time a Linear of a given shape runs,
+    libXSMM *emits x86 machine code bytes into memory* and jumps to them.
+    That is the JIT. No gcc, no LLVM, no MLIR involved in that step.
+  - LIBXSMM_VERBOSE=-1 dumps those bytes; objdump turns them into the .s
+    files in ../kernel_dump/ where you can grep vdpbf16ps.
+  - This is the fast path on this CPU today.
+
+MLIR (this folder)
+  - mlir-opt lowers dialects, mlir-translate emits LLVM IR, llc emits asm,
+    mlir-runner JITs and runs it.
+  - Nothing here feeds torch.ops.pace.*. They are two stacks side by side,
+    compared only by grepping mnemonics and by the FLOP benches.
+
+
+================================================================================
+3. VOCABULARY (the terms that kept coming up)
+================================================================================
+TPP            Tensor Processing Primitives: small high-performance matrix
+               kernels (blocked GEMM, BRGEMM). PACE exposes them as Linear.
+
+vdpbf16ps      AVX-512 BF16 dot product. v=vector, dp=dot product,
+               bf16=bfloat16 pairs, ps=accumulate into packed f32.
+               One instruction = 32 BF16 multiply-accumulates into 16 f32
+               lanes of a 512-bit zmm register. This is what PACE emits.
+
+VNNI           The data layout vdpbf16ps requires: K interleaved by 2, so
+               lanes hold (B[k][n], B[k+1][n]) pairs. PACE's preprocess()
+               packs W into 5D [Nk, Nc, 32, Hk, 2] blocks for this.
+               Without this layout the instruction is unusable.
+
+AMX            Intel Advanced Matrix Extensions, tile registers, tdpbf16ps.
+               NOT present on AMD EPYC. lower_amx.sh checks /proc/cpuinfo
+               for amx_tile and SKIPs. AMD's BF16 GEMM path is AVX-512
+               vdpbf16ps, not AMX.
+
+vmulss/vmulps  Scalar vs packed FP32 multiply.
+               vmulss = 1 float (xmm). vmulps on ymm = 8 floats (256-bit).
+               vmulps on zmm = 16 floats (512-bit).
+
+BRGEMM         Batch-reduce GEMM: the loop structure around the microkernel
+               that PACE uses to cover a full Linear.
+
+ukernel        The innermost hand-tuned kernel (register tile + ISA). The
+               thing libXSMM generates and stock mlir-opt does not.
+
+(Long form for VNNI, register widths, portable_matmul.mlir and the bf16
+ukernel: section 10 at the bottom of this file.)
+
+
+================================================================================
+4. THE MLIR LOWERING LADDER (what run_steps.sh dumps, out/00..out/22)
+================================================================================
+  linalg.matmul            the math, no machine in sight
+    -> bufferize           tensors become memref buffers
+    -> convert-linalg-to-loops   triple scf.for with mulf/addf  (NAIVE)
+    -> convert-scf-to-cf   structured loops become branches
+    -> LLVM dialect        still MLIR, but llvm.fmul / llvm.fadd
+    -> mlir-translate      real LLVM IR
+    -> llc                 x86 assembly
+
+Teaching files and what they actually emit on this box:
+  matmul.mlir           2x2 f32 linalg.matmul  -> vmulss + vaddss (scalar)
+  vector_contract.mlir  8x8 f32 vector.contract -> vmulps on ymm
+  dpbf16ps.mlir         llvm.call_intrinsic     -> vdpbf16ps on zmm
+  portable_matmul.mlir  linalg.matmul + tile schedule, NO isa in the IR
+  ../kernel_dump/*.s    PACE libXSMM JIT        -> vdpbf16ps on zmm
+
+Key realisations:
+  - matmul.mlir and vector_contract.mlir are SEPARATE files and separate
+    lowerings. No pass in this project turns one into the other.
+  - --convert-vector-to-llvm=enable-x86vector on an f32 vector.contract does
+    NOT produce vdpbf16ps. Wrong dtype, wrong layout.
+  - x86vector.avx512.dot (the upstream BF16 helper op) does not parse on this
+    AMD LLVM 20 build. llvm.call_intrinsic does work, and survives all the
+    way to a real vdpbf16ps.
+  - mlir-runner needs the runtime shared libs for rtclock/printF64:
+    lib/libmlir_runner_utils.so and lib/libmlir_c_runner_utils.so.
+
+
+================================================================================
+5. ENVIRONMENT TRAP (cost us a failed run)
+================================================================================
+These dumps are CPU-only. No GPU, no srun, no ROCm container.
+
+  login node ctr2-alola-login-04 : mlir-opt, mlir-translate, mlir-runner, llc
+                                   all present -> WORKS
+  compute node ctr-cx66-mi300x   : llc missing -> "missing llc"
+  rocm/dev-ubuntu-22.04 container: mlir-opt missing -> "missing mlir-opt"
+
+Exporting PATH does not help when the directory exists but the binary does
+not. run_steps.sh / lower_amx.sh now search $MLIR_BIN, /opt/rocm/llvm/bin,
+/opt/rocm-*/llvm/bin and accept a directory only if ALL four tools are there,
+and the error message says so. Override with:
+
+    MLIR_BIN=/path/to/llvm/bin ./run_steps.sh
+
+
+================================================================================
+6. BENCHMARKING: FOUR BUGS THAT MADE MLIR LOOK WORSE THAN IT IS
+================================================================================
+The first production table read: naive 0.39, portable 0.51, contract 3.02,
+PACE ~11380. Three of those four numbers were wrong. What was wrong:
+
+BUG 1  Timing the process instead of the kernel.
+       The harness timed the whole mlir-runner invocation: JIT compile, three
+       memref allocations, two 4096x4096 fills, then the GEMM. That fixed
+       cost is ~0.755 s and does not shrink with problem size.
+           reps=1: rtclock 0.3262 s (13.17 GF/s) vs process 1.0836 s (3.96)
+           reps=3: rtclock 0.9772 s (13.19 GF/s) vs process 1.7317 s (7.44)
+       FIX: call rtclock() inside @main around only the GEMM loop, with an
+       untimed warmup call before it so page faults land outside.
+
+BUG 2  mlir-runner JITs at -O0 by default.
+       We never passed an optimization level.
+           portable f32: --O0 7.57, --O2 12.94, --O3 13.06 GFLOP/s
+       FIX: pass --O3.
+       CAVEAT: this did NOT help the naive row (11.489 s at --O0 vs 11.580 s
+       at --O3). That loop walks B down a column with a 4096-float stride and
+       is cache/TLB-latency bound; codegen quality cannot rescue it. Its
+       0.37 GFLOP/s was always an honest number.
+
+BUG 3  Tiling without vectorizing measures nothing new.
+       The "portable" row tiled [32,64,64] and then went straight to
+       convert-linalg-to-loops, i.e. scalar loops.
+           tile + register tile, no vectorize .......... 5.27
+           + vectorize, default *dot* contraction ...... 5.12   (!)
+           + lower_contraction outerproduct ............ 5.26
+           + hoist the C tile out of the k loop ........ 13.14
+       Two lessons hide in there:
+         (a) Vectorizing and leaving the default lowering produced 64
+             llvm.intr.vector.reduce.fadd on vector<1xf32> -- scalar code
+             wearing vector types, no faster than not vectorizing.
+         (b) The single biggest pass was --loop-invariant-subset-hoisting,
+             which keeps the C register tile in registers across the k loop
+             instead of reloading/storing every step. It must run BEFORE
+             bufferization, while the tensor SSA chain still proves the
+             subsets are loop-invariant.
+       Also: transform.structured.vectorize with vector_sizes [4,16,1] is the
+       WRONG choice; a 3-D vector with a unit innermost dim becomes
+       !llvm.array<4 x array<16 x vector<1xf32>>> = 64 scalar multiplies.
+       Use vectorize_children_and_apply_patterns, which keeps the
+       vector.contract so you can then steer it with a lowering strategy.
+       Scope it to @matmul (transform.get_parent_op), not every func.func, or
+       it also vectorizes the 4096x4096 fill in @main into 4096 stores.
+
+BUG 4  Unequal threads.
+       PACE used OMP_NUM_THREADS=8 while mlir-runner is single-threaded.
+       FIX: OMP/MKL/OpenBLAS threads = 1 for every row; PACE at 8 cores is
+       kept as a separate, clearly labelled row.
+
+BONUS  Checking one element is not checking correctness.
+       A deliberately broken kernel that skips one 12-row block reports
+       587 GFLOP/s -- above the hardware ceiling -- and still passes a
+       C[0][0] check. The bench now scans all 524288 C elements.
+       bench/test_checksum_guard.py is that negative control.
+
+
+================================================================================
+7. THE NUMBERS (single core, M=128 N=4096 K=4096, 4294967296 FLOPs/gemm)
+================================================================================
+From out/flops_prod.txt:
+
+  path                                     ty      GFLOP/s
+  ---------------------------------------------------------------
+  MLIR naive loops                         f32        0.38
+  MLIR naive loops                         bf16       0.34
+  MLIR 8x8 vector.contract tiles           bf16       3.44
+  MLIR 8x8 vector.contract tiles           f32       11.57
+  MLIR portable (tile+tile+vectorize)      bf16      11.11
+  MLIR portable (tile+tile+vectorize)      f32       13.12
+  torch matmul (reference)                 f32      111.18
+  torch matmul (reference)                 bf16     419.87
+  PACE TPP Linear                          bf16     500.95
+  MLIR bf16 ukernel (VNNI + dpbf16ps)      bf16     526.73
+  ---------------------------------------------------------------
+  measured ISA ceiling of this core        bf16     577.70
+  PACE TPP, 8 cores                        bf16    4152.94
+
+WHY PLAIN bf16 IS SLOWER THAN f32
+  arith.mulf on bf16 has no hardware form on x86. MLIR emits
+  extend -> f32 multiply -> truncate per element, so bf16 does strictly more
+  work than f32 with the same loop structure. Changing the element type by
+  itself can never make MLIR faster. Speed comes from the INSTRUCTION, and
+  vdpbf16ps only accepts VNNI-interleaved data.
+
+THE bf16 UKERNEL (bench/prod_bf16_ukernel.mlir.in)
+  Layout: Ap[m][k2] and Bp[k2][n] are i32 arrays, each i32 holding a bf16
+  pair. vector.bitcast of 16 of them gives vector<32xbf16> in exactly the
+  lane order dpbf16ps wants: dst[i] += a[2i]*b[2i] + a[2i+1]*b[2i+1].
+  No conversion instructions at all.
+
+  Tuning path, 45 -> 527 GFLOP/s (full table in out/bf16_tuning.txt):
+      MR=4  NR=16, flat B  ...................  45.4
+      MR=4  NR=16, B packed into NR panels ...  190.9   <- layout alone, 4.2x
+      MR=8  NR=32, B panels ..................  526.3
+      MR=12 NR=32, B panels (winner) .........  542.2
+      same winner but i-outer instead of j-outer: 348   <- loop order matters
+  Packing B so the k loop reads consecutive cache lines was worth 2-4x on its
+  own. The flat layout advances 16 KB per k step and aliases onto a handful
+  of L2 sets. j-outer keeps one B panel resident in L2 while every row block
+  sweeps it.
+
+  Assembly proof (out/bf16_ukernel_isa.txt): 40 vdpbf16ps, 20 vbroadcastss,
+  24 zmm accumulators, no spills, C hoisted out of the k loop, and ZERO
+  vfmadd231ps / vcvtneps2bf16 / vpslld / vpmovzxwd -- nothing emulated.
+  (LLVM picks vbroadcastss, not vpbroadcastd; same 32-bit dword broadcast,
+  different execution domain.)
+
+  Ceiling: bench/peak_dpbf16ps.mlir.in measures 9.03 G vdpbf16ps/s with
+  register-only operands = 577.7 GFLOP/s. The ukernel is at 91-94% of that,
+  so what remains is B streaming from L3, not codegen. PACE sits at 87%.
+
+HOW TO READ THE COMPARISON HONESTLY
+  - Beating PACE by 5% on ONE hardcoded shape is not beating libXSMM.
+    The ukernel is ~390 generated lines for one M/N/K on one ISA.
+  - PACE's Linear also does an f32->bf16 output downconvert that we skip.
+  - Neither row times the pack (PACE packs in preprocess(), we fill packed
+    constants). That is a fair exclusion but it IS an exclusion.
+  - The tiny 2x2 / 8x8 / 16x16 rows in out/flops.txt are overhead-dominated
+    and mean nothing as a compiler comparison.
+
+
+================================================================================
+8. RECOMMENDATION
+================================================================================
+SHIP:  PACE / TPP for CPU Linear. It is at 87% of the ISA ceiling, handles
+       arbitrary shapes, and is already wired into PyTorch.
+
+DESIGN: keep linalg.matmul as the only place the math lives
+        (portable_matmul.mlir). A new architecture means a new backend or new
+        tile sizes, never a new @matmul. Its 13 GFLOP/s is fine -- that
+        number is supposed to be beaten by a ukernel, not by more
+        mlir-opt passes.
+
+DO NOT: hand-write intrinsics into product IR. dpbf16ps.mlir and
+        prod_bf16_ukernel.mlir.in exist to prove the gap is pack + ukernel +
+        ISA, and to measure the ceiling. They are not a maintenance plan:
+        every shape, dtype and CPU generation resets the tuning.
+
+NEXT:   close the gap with a ukernel BACKEND, not with passes.
+          tpp-mlir   linalg.matmul -> libXSMM calls. Shortest path from the
+                     IR you already have to the performance you already
+                     measured, and it uses the same engine as PACE.
+          IREE       whole-model compiler, CPU + GPU, --iree-llvmcpu-enable-
+                     ukernels=all, target-cpu=znver4/host.
+          triton-cpu experimental Triton-shaped DSL for CPU.
+
+GPU:    different stack entirely. Triton (block level) or AMD's FlyDSL
+        (thread level, CuTe-style layouts, Python -> MLIR -> ROCDL -> HSACO).
+        Neither helps EPYC. Note: PyDSL (Huawei) is a different project --
+        generic CPU polyhedral + Ascend NPU, not an AMD CPU path.
+
+WHEN HAND-WRITING IS JUSTIFIED: only if all three hold -- the shape is fixed
+and hot, you beat the library by a wide margin (not 5%), and someone owns
+re-tuning it at the next hardware generation.
+
+BENCHMARK DISCIPLINE worth carrying to any future comparison:
+  1. Time inside the kernel, never the process.
+  2. Pin threads so rows are comparable.
+  3. Verify the whole output, not one element.
+  4. Measure the ISA ceiling; without it you cannot tell "slow" from "done".
+
+
+================================================================================
+9. FILE MAP
+================================================================================
+Teaching IR (do not optimise these; they exist to be read)
+  matmul.mlir              2x2 f32 linalg.matmul, @main returns 19
+  vector_contract.mlir     8x8 f32 vector.contract, the vector-dialect hook
+  dpbf16ps.mlir            llvm.call_intrinsic -> one vdpbf16ps (ISA decoder)
+  portable_matmul.mlir     RECOMMENDED SHAPE: linalg.matmul + tile schedule
+
+Scripts
+  run_steps.sh             writes out/00..out/22 + INDEX + the ISA table
+  run_portable.sh          layers 1-2 only (linalg + tile), no ISA
+  lower_amx.sh             AMX probe; SKIP on EPYC
+  bench_flops.py/.sh       GFLOP/s tables
+                             (no flag) tiny kernels -> out/flops.txt
+                             --prod    128x4096x4096 -> out/flops_prod.txt
+
+Benches (generated / production sized)
+  bench/prod_naive.mlir.in       naive linalg at production size
+  bench/prod_portable.mlir.in    tile + register tile + vectorize
+  bench/prod_contract.mlir.in    8x8 vector.contract tiled over the GEMM
+  bench/prod_bf16_ukernel.mlir.in  VNNI + dpbf16ps, MR=12 x NR=32
+  bench/gen_bf16_ukernel.py      parameterised emitter for the above
+  bench/tune_bf16_ukernel.py     the sweep + ISA ceiling probe
+  bench/peak_dpbf16ps.mlir.in    hardware ceiling, zero memory traffic
+  bench/test_checksum_guard.py   negative control for the correctness check
+  bench/isa_proof.sh             translate + llc + grep the mnemonics
+
+Results
+  out/flops.txt            tiny-kernel table
+  out/flops_prod.txt       the like-to-like single-core table
+  out/bf16_tuning.txt      21 ukernel configurations
+  out/bf16_ukernel_isa.txt assembly proof + the annotated inner loop
+  out/15_pace_vs_mlir.txt  mnemonic comparison across all paths
+  out/NOTES.txt            greps pulled out of the numbered dumps
+  out/INDEX.txt            generated manifest
+
+Docs
+  README.md      overview and per-dump table
+  STEPS.md       what each numbered dump is, in order
+  DESIGN.md      the recommended production shape (layers 1-2-3)
+  LEARNINGS.txt  this file
+
+
+================================================================================
+10. FOUR THINGS EXPLAINED PROPERLY
+================================================================================
+
+--------------------------------------------------------------------------------
+10.1  Is the vector register fixed at 512 bits on AMD CPUs?
+--------------------------------------------------------------------------------
+No. x86 has three NESTED VIEWS of the same vector register file, and the
+instruction mnemonic selects which view you get:
+
+    name        width      f32 lanes   bf16 lanes   how many
+    xmm0-15     128-bit        4            8          16
+    ymm0-15     256-bit        8           16          16
+    zmm0-31     512-bit       16           32          32
+
+xmm5 IS the bottom 128 bits of zmm5. That is why the same machine produced:
+    2x2 matmul.mlir          vmulss    on %xmm0    1 float
+    8x8 vector_contract.mlir vmulps    on %ymm15   8 floats
+    bf16 ukernel             vdpbf16ps on %zmm25   32 bf16
+
+Two consequences that actually bit us:
+
+  (a) AVX-512 gives 32 registers, not 16. That extra half is what let the
+      ukernel keep 24 accumulators live across the whole k loop. It is also
+      why the sweep falls off a cliff at MR=16 x NR=32: that is 32
+      accumulators, leaving nothing for the B vectors and the broadcasts, so
+      the compiler spills and throughput drops 526 -> 400 GFLOP/s.
+      Register pressure is a real tuning constraint, not a detail.
+
+  (b) 512-bit ISA width is NOT the same as 512-bit execution datapath.
+      Different Zen generations implement AVX-512 with different internal
+      widths, so "supports zmm" and "executes zmm at full rate per cycle"
+      are separate questions. This is exactly why we measured the ceiling
+      empirically (bench/peak_dpbf16ps.mlir.in -> 9.03 G vdpbf16ps/s =
+      577.7 GFLOP/s) instead of computing it from a spec sheet.
+
+GPUs are unrelated: MI300X has 32-bit VGPRs operating across a wave, not
+512-bit vector registers.
+
+--------------------------------------------------------------------------------
+10.2  What portable_matmul.mlir actually is
+--------------------------------------------------------------------------------
+It is the recommended production shape: the math, plus a SEPARATE schedule
+saying how to execute it, with no ISA named anywhere.
+
+The file has two independent halves:
+
+  @matmul               the payload. One linalg.matmul. This is the thing you
+                        never rewrite when the hardware changes.
+
+  @__transform_main     the SCHEDULE, written in the transform dialect. It is
+                        a program ABOUT the other program: "find every
+                        linalg.matmul, tile it 8x8x8". It only runs when you
+                        pass --transform-interpreter; otherwise it sits inert.
+
+That separation is the whole idea. The schedule is data you edit per machine
+without touching the math.
+
+After the interpreter runs you STILL have a linalg.matmul -- now an 8x8 one,
+wrapped in three scf.for loops with tensor.extract_slice feeding it. Tiling
+rewrote the loop structure, not the operation. The production bench
+(bench/prod_portable.mlir.in) extends the same schedule to [32,64,64] then
+[4,16,1] and adds a vectorize step.
+
+Contrast dpbf16ps.mlir, which hardcodes llvm.x86.avx512bf16.dpbf16ps.512:
+that file only runs on AVX-512-BF16 machines. portable_matmul.mlir runs
+anywhere a backend exists.
+
+--------------------------------------------------------------------------------
+10.3  What "VNNI-interleaved" means
+--------------------------------------------------------------------------------
+VNNI is a MEMORY LAYOUT, and it is forced on you by what the instruction
+reads out of its lanes.
+
+vdpbf16ps computes, for each of the 16 output f32 lanes:
+
+    dst[i] += a[2i] * b[2i] + a[2i+1] * b[2i+1]
+
+Lanes 2i and 2i+1 are ADJACENT. Now write the GEMM you want, pairing two k
+values:
+
+    C[m][n] += A[m][k]*B[k][n] + A[m][k+1]*B[k+1][n]
+
+Match them up: lane 2i must hold B[k][n] and lane 2i+1 must hold B[k+1][n].
+That is two elements from CONSECUTIVE ROWS of B, same column, sitting next to
+each other inside the register.
+
+In row-major B those two values are 4096 elements apart. One load cannot
+fetch them into adjacent lanes. So B is pre-shuffled into [K/2][N][2]:
+
+    row-major B              VNNI-packed Bp
+    B[0][0] B[0][1] ...      (B[0][0],B[1][0]) (B[0][1],B[1][1]) ...
+    B[1][0] B[1][1] ...      (B[2][0],B[3][0]) (B[2][1],B[3][1]) ...
+
+Now one 64-byte load grabs 16 pairs in exactly the order the instruction
+wants. In our bench each pair is one i32, so:
+
+    %bi = vector.load %Bp[...] : vector<16xi32>
+    %b  = vector.bitcast %bi   : vector<16xi32> to vector<32xbf16>
+
+Zero conversion instructions. A needs the pair (A[m][k], A[m][k+1]) repeated
+in every lane pair, which is just a 32-bit dword broadcast -- the
+vbroadcastss in the assembly.
+
+This is why PACE's preprocess() turns a 2D weight into 5D
+[Nk, Nc, 32, Hk, 2]: that trailing 2 IS the VNNI dimension. Without this
+layout the instruction is unusable, which is the whole reason plain bf16 MLIR
+falls back to extend/multiply/truncate and ends up slower than f32.
+
+--------------------------------------------------------------------------------
+10.4  How the bf16 ukernel works, and why it lands next to PACE
+--------------------------------------------------------------------------------
+Structure: HOLD A TILE OF C IN REGISTERS, STREAM A AND B PAST IT.
+
+Loop nest is j outer -> i -> k. For each (row block, column block):
+
+  1. Load the C tile into 24 zmm accumulators (12 rows x 2 vectors of 16
+     f32 = 12x32 outputs). Critically this happens OUTSIDE the k loop.
+  2. Inner k loop, 2048 iterations, one per k-pair:
+       2 B vector loads, 12 A dword broadcasts, 24 vdpbf16ps accumulating
+       in place.
+  3. Store the C tile once, after the k loop finishes.
+
+Why this is ~1500x the naive loop -- count work per innermost iteration:
+
+                        naive bf16 loop        bf16 ukernel
+    useful FLOPs              2                   1536
+                                                  (24 insns x 16 lanes
+                                                   x 2 MACs x 2 flops)
+    memory ops          3 loads + 1 store     2 loads + 12 broadcasts
+    conversions         extend + truncate           none
+                        per element
+
+The naive loop does 2 FLOPs and touches memory 4 times. The ukernel does 1536
+FLOPs against 2 cache-line loads. That ratio -- arithmetic intensity -- is
+what moves you from memory-bound to compute-bound. Everything else in the
+tuning table is a second-order effect on top of it.
+
+Why it lands next to PACE (527 vs 501) is that it makes the same four
+choices libXSMM makes:
+    - the same instruction (vdpbf16ps): same FLOPs per instruction
+    - the same VNNI layout: no conversion overhead
+    - accumulators resident in registers across the whole k loop
+    - B packed into panels so the k loop reads consecutive cache lines, and
+      j-outer ordering so one panel stays L2-resident while every row block
+      sweeps it
+The last one alone was worth 4.2x (45 -> 191 GFLOP/s at MR=4 x NR=16),
+before any register-tile change.
+
+Both implementations land near the same number because it is a HARDWARE wall:
+577.7 GFLOP/s is this core's vdpbf16ps issue rate. We are at 91%, PACE at
+87%. There is no faster instruction on this machine, so neither side can pull
+meaningfully ahead.
+
+What PACE still has that this does not: it JITs the kernel for ANY M/N/K with
+automatic remainder handling, does the actual packing, and adds K-blocking,
+prefetch and epilogue fusion. Ours is ~390 generated lines for one hardcoded
+shape on one ISA, and it needs a separate 8-row tail block purely because 128
+is not divisible by MR=12.
+
+
+================================================================================
+11. THE AUTOMATIC CHAIN WORKS ON LLVM 22 (not on ROCm LLVM 20)
+================================================================================
+The missing last link was the toolchain, not the idea. Packaged LLVM 22.1.8
+from apt.llvm.org (Docker image pace-learn-mlir:llvm22, see mlir/chain/)
+has all three pieces ROCm LLVM 20 did not:
+
+  - the op          x86vector.avx512.dot
+  - the transform   transform.apply_patterns.x86vector.vector_contract_to_packed_type_dot_product
+  - the intrinsic   llvm.x86.avx512bf16.dpbf16ps.512  ->  vdpbf16ps
+
+The chain we actually ran, on a 4x32 * 32x16 bf16->f32 matmul:
+
+  linalg.matmul
+    -> transform.structured.pack packed_sizes = [0, 0, 2]   # VNNI on K
+    -> tile_using_for [1, 16, 1]                            # M=1, one zmm of N
+    -> vectorize_children_and_apply_patterns
+    -> fold_arith_extension                                 # drop the bf16->f32 extf
+    -> vector_contract_to_packed_type_dot_product
+    -> x86vector.avx512.dot
+    -> llvm.x86.avx512bf16.dpbf16ps.512
+    -> vdpbf16ps
+
+mlir-runner on all-ones A, B printed 32, 32, 32 (K=32, every C[i,j] = 32).
+Dump is chain/out/D_scheduled.mlir; asm grep is chain/out/C3.s.
+
+What this 1x16 schedule is not: a 128x4096x4096 production kernel. Register
+tile is still M=1. Section 12 is the 12x32 + B-panel schedule that closes
+the gap. The point of this experiment is that MLIR can emit vdpbf16ps from
+linalg.matmul without a handwritten intrinsic.
+
+To rerun:  cd mlir && ./chain/run.sh
+Rebuild:   docker build -t pace-learn-mlir:llvm22 -f chain/Dockerfile chain/
+
+
+================================================================================
+12. 12x32 REGISTER TILE + B PANELS WITHOUT A HAND UKERNEL
+================================================================================
+The 1x16 automatic tile (section 11) never built a 12x32 register tile or
+sequential-K B panels. That is a schedule, not a reason to write
+prod_bf16_ukernel.mlir.in. On LLVM 22 the transform dialect can do both:
+
+  packed_sizes = [12, 32, 2]
+    A -> [M/12, K/2, 12, 2]
+    B -> [K/2, N/32, 32, 2]
+  pack_transpose B outer_perm = [1, 0]
+    B -> [N/32, K/2, 32, 2]          # K walks 128-byte lines
+  interchange N_o, M_o, K_o
+  tile [1, 1, 1, 1, 16] + unroll 2 x 12
+  vectorize + hoist 24 C vectors out of K
+
+packed-dot still wants the 4D unit-M shape (1x1x2 x 1x16x2 -> 1x16), so
+reshape_vnni_contract.py shape_casts the extra unit dims. That is not a
+ukernel; the 24 dots, B panels, and C registers come from the schedule.
+
+Lowering matters as much as the schedule. convert-vector-to-scf spilled the
+24 zmms (~90 GFLOP/s). Flattening transfers instead
+(--test-vector-transfer-flatten-patterns, no vector-to-scf) keeps C in
+zmm0-23. Inner loop matches the hand ukernel:
+
+  vbroadcastss A[row]
+  vmovups B[k], B[k]+64
+  24 x vdpbf16ps into zmm0-23
+  subq $-128, %rbp                  # B += 128 bytes
+
+128x4096x4096 bf16, 1 core, checksum 8192:
+
+  automatic 1x16 pack-chain              ~12 GFLOP/s
+  C-in-zmm + B panels, still 1x16          49
+  transform 12x32 + B panels (this)       ~525
+  hand ukernel                            527
+  PACE                                    501
+  peak                                    578
+
+M=128 is padded to 132 so MR=12 divides; useful FLOPs still counted as
+2*128*N*K. Files: chain/04_matmul_12x32.mlir, chain/bench_prod_12x32.mlir.
+PACE remains the production Linear; this is the MLIR schedule that closes
+the gap.
