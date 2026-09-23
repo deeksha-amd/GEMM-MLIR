@@ -351,5 +351,5 @@ MLIR_VER=$("$MLIR_BIN" --version 2>&1 | head -1 || true)
 echo
 echo "Dumps in $PWD/$OUT"
 echo "Walkthrough:  $PWD/STEPS.md"
-echo "Overview:     $PWD/README.md"
+echo "Compare:      $PWD/COMPARE.md"
 echo "PACE JIT:     grep vdpbf16ps ../kernel_dump/*br3*.mxm.s | head"

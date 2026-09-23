@@ -1,5 +1,7 @@
 # Step-by-step: MLIR GEMM dumps
 
+Start from the [root README](../README.md). This page explains each file `run_steps.sh` writes.
+
 Each numbered file lives in `mlir/out/`. Re-generate with:
 
 ```bash
