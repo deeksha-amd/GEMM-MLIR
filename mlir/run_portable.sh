@@ -34,4 +34,4 @@ grep -n -E 'linalg.matmul|scf.for|affine.for' out/21_portable_tiled.mlir | head 
 echo
 echo "Wrote out/21_portable_tiled.mlir"
 echo "Layer 3 (backend) is not in this IR — PACE, IREE, or CPU LLVM."
-echo "See DESIGN.md"
+echo "Layer 3 (backend) is not in this IR — PACE, IREE, or CPU LLVM."

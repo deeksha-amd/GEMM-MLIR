@@ -167,7 +167,7 @@ This is one instruction, **not** the production shape (see 20–22). Not TPP Lin
 ## 20–22  `portable_matmul.mlir` (recommended MLIR shape)
 
 Keep `linalg.matmul`. Tile in a transform schedule. **No** `vdpbf16ps` in this IR.
-Full write-up: [DESIGN.md](DESIGN.md). Quick run: `./run_portable.sh`.
+Quick run: `./run_portable.sh`.
 
 | File | Command | What to look at |
 |---|---|---|

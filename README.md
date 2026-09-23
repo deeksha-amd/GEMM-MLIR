@@ -22,7 +22,7 @@ cd GEMM-MLIR
 # PACE on EPYC CPU (not the MI300X GPU). Needs the CPU venv from setup_and_run.sh.
 ./setup_and_run.sh
 
-# MLIR recommended shape (no ISA in source): see mlir/DESIGN.md
+# MLIR recommended shape (no ISA in source): portable_matmul.mlir
 ./mlir/run_portable.sh
 ./mlir/run_steps.sh
 ./mlir/lower_amx.sh
@@ -41,8 +41,6 @@ PACE_INSPECT=0 ./setup_and_run.sh
 
 | File | Contents |
 |---|---|
-| `mlir/LEARNINGS.txt` | **Start here.** Concepts, benchmarking bugs, all measurements, recommendation |
-| `mlir/DESIGN.md` | **Recommended production shape** (linalg + tiles + backends) |
 | `mlir/README.md` | PACE vs MLIR, ISA comparison |
 | `mlir/STEPS.md` | What each `mlir/out/NN_*` file is, in order |
 | `mlir/out/INDEX.txt` | Generated manifest after a run |
@@ -60,7 +58,6 @@ mlir/
   vector_contract.mlir   8x8 vector.contract (ISA hook)
   dpbf16ps.mlir      ISA decoder (not the product path)
   portable_matmul.mlir   recommended: linalg.matmul + tile schedule
-  DESIGN.md          production-shaped MLIR layers
   run_portable.sh    layer 1–2 only
   bench_flops.sh     PACE vs 2x2 vs contract vs portable GFLOP/s
   run_steps.sh       writes out/00 .. out/22, INDEX, 15

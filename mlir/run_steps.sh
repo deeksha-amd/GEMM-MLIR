@@ -354,6 +354,5 @@ echo
 echo "Dumps in $PWD/$OUT"
 echo "Walkthrough:  $PWD/STEPS.md"
 echo "Overview:     $PWD/README.md"
-echo "Design:       $PWD/DESIGN.md   (recommended MLIR shape)"
 echo "Next:         ./lower_amx.sh"
 echo "PACE JIT:     grep vdpbf16ps ../kernel_dump/*br3*.mxm.s | head"

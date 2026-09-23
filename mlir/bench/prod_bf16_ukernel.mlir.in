@@ -14,7 +14,7 @@
 // must therefore come out to exactly K = 4096 per pass.
 //
 // NOTE: this file names an ISA on purpose.  It is a layer-3 ukernel
-// experiment, NOT the portable shape (see ../DESIGN.md).  In production this
+// experiment, NOT the portable shape.  In production this
 // kernel comes from libXSMM/PACE or tpp-mlir, not hand-written per arch.
 
 func.func private @rtclock() -> f64

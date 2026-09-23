@@ -1,6 +1,6 @@
 # MLIR GEMM beside PACE TPP
 
-**Recommended MLIR design:** `portable_matmul.mlir` + [DESIGN.md](DESIGN.md) — keep `linalg.matmul`, tile in a schedule, swap a **backend** when the machine changes. Do **not** ship `dpbf16ps.mlir` as the product kernel.
+**Recommended MLIR design:** `portable_matmul.mlir` — keep `linalg.matmul`, tile in a schedule, swap a **backend** when the machine changes. Do **not** ship `dpbf16ps.mlir` as the product kernel.
 
 Two compilers, same math `C = A @ B` (PACE Linear is `Y = X @ W.T` with `B = W.T`).
 
@@ -14,7 +14,7 @@ Two compilers, same math `C = A @ B` (PACE Linear is `Y = X @ W.T` with `B = W.T
 
 This is **not** plugged into `torch.ops.pace.libxsmmlinear_plain`. New ISA → new **backend** (or PACE upgrade), not a rewrite of `@matmul`.
 
-Numbered dumps: **[STEPS.md](STEPS.md)**. Shape: **[DESIGN.md](DESIGN.md)**. Everything we learned, including the benchmarking mistakes and the bf16 ukernel result: **[LEARNINGS.txt](LEARNINGS.txt)**. After a run: **`out/INDEX.txt`**.
+Numbered dumps: **[STEPS.md](STEPS.md)**. After a run: **`out/INDEX.txt`**.
 
 ## Commands
 
@@ -91,7 +91,7 @@ That is two BF16 muls + add into FP32, 16 lanes. Different compiler, same GEMM i
 
 **`vector.contract`** is where you would later attach `--convert-vector-to-llvm=enable-amx` or a future AMD tile pass. `linalg.matmul` stays.
 
-**MLIR `portable_matmul.mlir` (recommended):** `linalg.matmul` + tile schedule. New box → new backend, same `@matmul`. See [DESIGN.md](DESIGN.md).
+**MLIR `portable_matmul.mlir` (recommended):** `linalg.matmul` + tile schedule. New box → new backend, same `@matmul`.
 
 **MLIR `dpbf16ps.mlir`:** skip linalg; call the LLVM intrinsic. Same **mnemonic** as PACE; **not** the production shape.
 
